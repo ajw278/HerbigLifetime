@@ -245,13 +245,13 @@ def main():
         bg,
         extent=[xmin, xmax, ymin, ymax],
         origin="lower",
-        aspect="equal",
+        aspect="equal"
     )
     ax.scatter(x_star, y_star, s=10)
     ax.set_xlabel("$X$ [pc]")
     ax.set_ylabel("$Y$ [pc]")
 
-    cbar = plt.colorbar(im, ax=ax, vmin=-1, vmax=4.0)
+    cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("log $\dot{\Sigma}_\mathrm{SFR}$  [$M_\odot$ Myr$^{-1}$ kpc$^{-2}$]")
 
     plt.tight_layout()
