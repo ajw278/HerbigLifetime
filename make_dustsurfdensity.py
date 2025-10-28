@@ -187,7 +187,7 @@ def main():
     args = ap.parse_args()
 
     # dustmaps location + optional fetch
-    dustmaps_config["data_dir"] = args.dust_dir or os.path.expanduser("~/.dustmaps")
+    dustmaps_config["data_dir"] = args.dust_dir or os.path.expanduser("./dustmaps_data")
     if args.fetch:
         print("Fetching Edenhofer 2023 map (only needed once)...", file=sys.stderr)
         eden.fetch()
