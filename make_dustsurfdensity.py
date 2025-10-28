@@ -25,6 +25,7 @@ import astropy.units as u
 from dustmaps.config import config as dustmaps_config
 import dustmaps.edenhofer2023 as eden
 from dustmaps.edenhofer2023 import Edenhofer2023Query
+from scipy.ndimage import gaussian_filter 
 
 
 def icrs_to_gal_lbd(ra_deg: np.ndarray, dec_deg: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -88,6 +89,41 @@ def _save_av_cache(path: str,
         meta_json=np.array(meta_json),
     )
     print(f"Saved AV_per_pc cache to '{path}' (shape={AV_per_pc.shape}).", file=sys.stderr)
+
+def local_sfr(npz_path, radii_pc, treat_zeros_as_nan=False):
+    data = np.load(npz_path, allow_pickle=False)
+    x = data["x_grid"]          # pc
+    y = data["y_grid"]          # pc
+    S = data["Sigma_SFR"]       # Msun / yr / kpc^2
+    # Optional: ignore cells that are exactly 0 (helps if dust map masked d<~69 pc)
+    if treat_zeros_as_nan:
+        S = np.where(S==0.0, np.nan, S)
+
+    XX, YY = np.meshgrid(x, y, indexing="xy")
+    dx_pc = float(x[1]-x[0]); dy_pc = float(y[1]-y[0])
+    A_pix_kpc2 = (dx_pc/1000.0)*(dy_pc/1000.0)
+
+    out = []
+    for R_pc in radii_pc:
+        R = float(R_pc)
+        mask = (XX**2 + YY**2) <= R*R
+        S_mask = S[mask]
+        # mean Σ_SFR (area-weighted == plain mean on a uniform grid)
+        mean_sig = np.nanmean(S_mask)
+        # total area and total SFR inside aperture
+        area_kpc2 = np.count_nonzero(mask) * A_pix_kpc2
+        sfr_total = mean_sig * area_kpc2
+        # simple spread (16–84th percentiles of pixel values)
+        p16, p50, p84 = np.nanpercentile(S_mask, [16, 50, 84])
+        out.append(dict(
+            R_pc=R,
+            mean_Sigma_SFR=mean_sig,      # Msun/yr/kpc^2
+            median_Sigma_SFR=p50,
+            pct16=p16, pct84=p84,
+            area_kpc2=area_kpc2,
+            SFR_total=sfr_total           # Msun/yr
+        ))
+    return out
 
 def compute_AV_slab_from_dust(
     x_grid: np.ndarray, y_grid: np.ndarray, z_vals: np.ndarray,
@@ -173,6 +209,10 @@ def main():
     ap.add_argument("--ks_A", type=float, default=2.5e-4, help="Kennicutt–Schmidt A (Msun yr^-1 kpc^-2)")
     ap.add_argument("--ks_N", type=float, default=1.4, help="Kennicutt–Schmidt N")
     ap.add_argument("--av_to_gas", type=float, default=21.3, help="Σ_gas [Msun/pc^2] per mag(A_V)")
+    ap.add_argument("--dust_to_gas", type=float, default=1e-2,
+                help="Dust-to-gas mass ratio (Σ_dust = Σ_gas * DGR)")
+    ap.add_argument("--kernel_pc", type=float, default=200.0,
+                help="Gaussian smoothing kernel FWHM (pc) for gas before K–S")
     ap.add_argument("--av_per_E", type=float, default=2.8, help="A_V per E unit from Edenhofer map")
     ap.add_argument("--grid", type=int, default=201, help="Grid size per axis (Nx=Ny)")
     ap.add_argument("--margin", type=float, default=200.0, help="Margin (pc) beyond star extent")
@@ -184,7 +224,11 @@ def main():
     # caching
     ap.add_argument("--av_cache", default="av_per_pc_cache.npz", help="Path to cache the A_V-per-pc 3D cube")
     ap.add_argument("--cache_mode", choices=["auto", "load", "save", "off"], default="auto", help="Cache behavior")
+    ap.add_argument("--radii_pc", nargs="+", type=float, default=[200, 500, 1000])
+    ap.add_argument("--ignore_masked_zeros", action="store_true",
+                    help="Treat zeros as NaN (avoids bias from dust-map invalid radii).")
     args = ap.parse_args()
+    
 
     # dustmaps location + optional fetch
     dustmaps_config["data_dir"] = args.dust_dir or os.path.expanduser("./dustmaps_data")
@@ -234,46 +278,109 @@ def main():
     )
 
 
-    # Convert to Σ_gas and then Σ_SFR
-    Sigma_gas = args.av_to_gas * AV_slab  # Msun/pc^2
-    Sigma_SFR = args.ks_A * np.power(np.maximum(Sigma_gas, 0.0), args.ks_N)  # Msun yr^-1 kpc^-2
+    # --- pixel scale & Gaussian σ in pc/pixels ---
+    dx_pc = float(x_grid[1] - x_grid[0])
+    dy_pc = float(y_grid[1] - y_grid[0])
+    sigma_pc    = args.kernel_pc / 2.355                     # smoothing length (Gaussian σ)
+    sigma_x_pix = sigma_pc / max(dx_pc, 1e-9)
+    sigma_y_pix = sigma_pc / max(dy_pc, 1e-9)
 
-    # Plot
-    fig, ax = plt.subplots(figsize=(8, 8))
-    bg = np.log10(np.maximum(Sigma_SFR, np.percentile(Sigma_SFR, 1) * 1e-6))
-    im = ax.imshow(
-        bg,
+    # --- base fields (native resolution) ---
+    dust_per_mag = args.av_to_gas * args.dust_to_gas         # e.g. 21.3 * 0.01 = 0.213
+    Sigma_dust   = dust_per_mag * AV_slab                    # [Msun/pc^2]
+    Sigma_gas    = Sigma_dust / max(args.dust_to_gas, 1e-12) # 100× dust by default
+
+    # --- define domain by "vertical half-height at d = dmax" >= smoothing length ---
+    XX, YY = np.meshgrid(x_grid, y_grid, indexing='xy')
+    R_xy   = np.sqrt(XX**2 + YY**2)                          # cylindrical radius in plane
+    # height of the sphere surface above the mid-plane at this R (outer boundary only)
+    z_surf = np.sqrt(np.maximum(0.0, args.dmax**2 - R_xy**2))  # [pc]
+    # also cap by the slab (|z| <= zmax)
+    H_eff  = np.minimum(z_surf, args.zmax)                   # effective half-height available
+    domain = (H_eff >= sigma_pc*2.)                             # require at least one σ of vertical support
+
+    # (FYI: the resulting truncation radius is R_trunc ≈ sqrt(dmax^2 - σ^2).)
+
+    # --- geometric-mean fill outside + normalized Gaussian smoothing in log space ---
+    # Ensure strictly positive values before log:
+    inside = Sigma_gas[domain]
+    # pick a tiny floor that won’t matter but avoids log(0); use a very low percentile of inside
+    floor  = float(max(1e-12, (np.nanpercentile(inside, 0.1) * 1e-6) if inside.size else 1e-12))
+    Sigma_gas_safe = np.where(domain, np.maximum(Sigma_gas, floor), floor)
+
+    logSigma = np.log(Sigma_gas_safe)
+    mu       = float(np.nanmean(logSigma[domain]))           # mean(log Σ) inside → geometric mean outside
+
+    # de-mean within domain; zero outside so cval=0 matches
+    arr = np.where(domain, logSigma - mu, 0.0)
+    w   = np.where(domain, 1.0, 0.0)
+
+    num = gaussian_filter(arr, sigma=(sigma_y_pix, sigma_x_pix), mode="constant", cval=0.0)
+    den = gaussian_filter(w,   sigma=(sigma_y_pix, sigma_x_pix), mode="constant", cval=0.0)
+
+    eps = 1e-6  # linear-space threshold on weights
+    logSigma_sm  = np.where(den > eps, mu + num/den, mu)
+    Sigma_gas_sm = np.exp(logSigma_sm)
+
+    # --- K–S on the smoothed gas ---
+    Sigma_SFR_sm = args.ks_A * np.power(np.maximum(Sigma_gas_sm, 0.0), args.ks_N)
+
+    # Percentile thresholds **inside the dust domain** only (robust color scaling)
+    dust_domain = np.isfinite(Sigma_dust) & (Sigma_dust > 0)
+    v1 = np.nanpercentile(Sigma_SFR_sm[dust_domain], 1) if np.any(dust_domain) else 0.0
+
+    Sigma_SFR_sm[~dust_domain] = np.nan
+
+ 
+    # ---------- plotting: two panels ----------
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+
+    # Left: dust surface density (log10)
+    im0 = axes[0].imshow(
+        np.log10(np.maximum(Sigma_dust, np.percentile(Sigma_dust, 1)*1e-3)),
         extent=[xmin, xmax, ymin, ymax],
-        origin="lower",
-        aspect="equal"
+        origin="lower", aspect="equal"
     )
-    ax.scatter(x_star, y_star, s=10)
-    ax.set_xlabel("$X$ [pc]")
-    ax.set_ylabel("$Y$ [pc]")
+    axes[0].scatter(x_star, y_star, s=10)
+    axes[0].set_xlabel("X [pc]"); axes[0].set_ylabel("Y [pc]")
+    axes[0].set_title(r"$\Sigma_{\rm dust}$  [M$_\odot$ pc$^{-2}$] (native)")
+    cb0 = plt.colorbar(im0, ax=axes[0]); cb0.set_label(r"log$_{10}$ $\Sigma_{\rm dust}$")
 
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("log $\dot{\Sigma}_\mathrm{SFR}$  [$M_\odot$ Myr$^{-1}$ kpc$^{-2}$]")
+    # Right: smoothed SFR (log10)
+    im1 = axes[1].imshow(
+        np.log10(Sigma_SFR_sm*1e6),
+        extent=[xmin, xmax, ymin, ymax],
+        origin="lower", aspect="equal",
+        vmin=-1, vmax=4.
+    )
+    axes[1].scatter(x_star, y_star, s=10)
+    axes[1].set_xlabel("X [pc]"); axes[1].set_ylabel("Y [pc]")
+    axes[1].set_title(r"Smoothed $\dot{\Sigma}_{\rm SFR}$  [M$_\odot$ yr$^{-1}$ kpc$^{-2}$]")
+    cb1 = plt.colorbar(im1, ax=axes[1]); cb1.set_label(r"log$_{10}$ $\dot{\Sigma}_{\rm SFR}$")
 
-    plt.tight_layout()
-    fig.savefig(args.out, dpi=150)
+    plt.savefig(args.out, dpi=150)
     print(f"Saved figure to {args.out}", file=sys.stderr)
 
-    # Save grid and map for reuse
+    # ---------- save all the useful arrays ----------
     np.savez_compressed(
         args.npz,
         x_grid=x_grid,
         y_grid=y_grid,
-        Sigma_SFR=Sigma_SFR,
         AV_slab=AV_slab,
+        Sigma_dust=Sigma_dust,
         Sigma_gas=Sigma_gas,
+        Sigma_gas_smoothed=Sigma_gas_sm,
+        Sigma_SFR_smoothed=Sigma_SFR_sm,
         meta=dict(
-            zmax=args.zmax, dz=args.dz, ks_A=args.ks_A, ks_N=args.ks_N,
-            av_to_gas=args.av_to_gas, av_per_E=args.av_per_E,
-            dmin=args.dmin, dmax=args.dmax
+            zmax=args.zmax, dz=args.dz,
+            ks_A=args.ks_A, ks_N=args.ks_N,
+            av_to_gas=args.av_to_gas,
+            dust_to_gas=args.dust_to_gas,
+            dust_per_mag=dust_per_mag,
+            kernel_pc=args.kernel_pc
         ),
     )
-    print(f"Saved grid to {args.npz}", file=sys.stderr)
 
-
+    plt.show()
 if __name__ == "__main__":
     main()
