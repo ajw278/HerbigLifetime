@@ -115,7 +115,7 @@ def main():
     ap.add_argument("--dmax", type=float, default=1250.0, help="Dust map valid outer radius (pc)")
     ap.add_argument("--chunk", type=int, default=500_000, help="Dust query chunk size")
     ap.add_argument("--fetch", action="store_true", help="Fetch Edenhofer dust map if not already present")
-    ap.add_argument("--dust_dir", default=None, help="dustmaps data directory; defaults to ~/.dustmaps")
+    ap.add_argument("--dust_dir", default=None, help="dustmaps data directory; defaults to ./dustmaps_data")
     args = ap.parse_args()
 
     # Configure dustmaps location and fetch data if requested
@@ -123,7 +123,7 @@ def main():
         dustmaps_config["data_dir"] = args.dust_dir
     else:
         # Ensure default exists
-        dustmaps_config["data_dir"] = os.path.expanduser("~/.dustmaps")
+        dustmaps_config["data_dir"] = os.path.expanduser("./dustmaps_data")
 
     if args.fetch:
         print("Fetching Edenhofer 2023 map (only needed once)...", file=sys.stderr)
