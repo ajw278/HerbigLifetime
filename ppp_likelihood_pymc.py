@@ -63,6 +63,10 @@ def main():
     ap.add_argument("--tune", type=int, default=1000)
     ap.add_argument("--target_accept", type=float, default=0.9)
     ap.add_argument("--out", default="", help="If set, save trace to this netcdf file")
+    ap.add_argument("--zsun_mu_pc", type=float, default=20.8,
+                help="Prior mean for Sun height above the Galactic mid-plane [pc]")
+    ap.add_argument("--zsun_sigma_pc", type=float, default=2.0,
+                    help="Prior sigma for z_sun [pc] (small, informative)")
     args = ap.parse_args()
 
     # ---- load packs ----
@@ -126,15 +130,15 @@ def main():
     # ---- PyMC model ----
     with pm.Model() as model:
         # ----- Priors -----
-        log10_tau0_Myr = pm.Normal("log10_tau0_Myr", mu=np.log10(3.0), sigma=1.0)
-        beta           = pm.Normal("beta", mu=-0.7, sigma=0.7)
+        log10_tau0_Myr = pm.Normal("log10_tau0_Myr", mu=np.log10(3.0), sigma=0.2)
+        beta           = pm.Normal("beta", mu=-0.7, sigma=1.0)
         h_z_pc         = pm.HalfNormal("h_z_pc", sigma=60.0)
 
         # selection coefficients
         a0     = pm.Normal("a0", mu=0.0, sigma=3.0)
         a_mu   = pm.Normal("a_mu", mu=-0.5, sigma=0.5)
-        a_Av   = pm.Normal("a_Av", mu=-1.0, sigma=0.5)
-        a_logM = pm.Normal("a_logM", mu=+1.0, sigma=0.5)
+        a_Av   = pm.Normal("a_Av", mu=-1.0, sigma=1.0)
+        a_logM = pm.Normal("a_logM", mu=1.0, sigma=1.0)
 
         # global scale for birth map (absorbs Σ_SFR→Σ_birth calibration etc.)
         s_birth = pm.LogNormal("s_birth", mu=0.0, sigma=1.0)
@@ -142,12 +146,20 @@ def main():
         # ----- Deterministic components -----
         tau0_yr = (10.0 ** log10_tau0_Myr) * 1.0e6  # years
 
-        # Vertical profile fz on grid and star nodes
+        z_sun_pc = pm.Normal("z_sun_pc", mu=args.zsun_mu_pc, sigma=args.zsun_sigma_pc)
+
+        # ----- Deterministic components -----
+        SQ2PI = np.sqrt(2.0 * np.pi)
+
         def fz(z):
             return (1.0 / (SQ2PI * h_z_pc)) * pm.math.exp(-0.5 * (z / h_z_pc) ** 2)
 
-        fz_grid = fz(pt.as_tensor_variable(z_grid))
-        fz_nodes = fz(pt.as_tensor_variable(z_nodes))  # (N, Kd)
+        # Use mid-plane heights in BOTH normalization grid and per-star nodes
+        z_grid_mid  = pt.as_tensor_variable(z_grid)  + z_sun_pc   # (G,)
+        z_nodes_mid = pt.as_tensor_variable(z_nodes) + z_sun_pc   # (N, Kd)
+
+        fz_grid  = fz(z_grid_mid)          # replaces previous fz(pt.as_tensor_variable(z_grid))
+        fz_nodes = fz(z_nodes_mid)         # replaces previous fz(pt.as_tensor_variable(z_nodes))
 
         # ---------- Normalization integral Λ ----------
         # cell base factor (stars/yr per cell, up to the mass sum and s_birth)

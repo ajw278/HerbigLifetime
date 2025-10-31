@@ -7,8 +7,69 @@ import arviz as az
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 import matplotlib as mpl
+from mpl_setup import *
 
-# ------------- existing helpers (unchanged, trimmed) ----------------
+az.rcParams["plot.max_subplots"] = 200 
+
+def _wrap_math(label):
+    # If it's already $...$, leave it; else wrap for mathtext.
+    print(label)
+    if isinstance(label, str) and label.startswith("$") and label.endswith("$"):
+        return label
+    print("wrapping")
+    return f"${label}$"
+
+def annotate_diag_stats(
+    ax_grid, X, names, label_map=None,
+    fmt=".2f",  # number format for values and errors
+    loc="ur",   # 'ur','ul','lr','ll' (upper/lower, right/left)
+    fontsize=11,
+    box_kw=None
+):
+    """
+    Write 'median^{+errp}_{-errm}' on each diagonal panel.
+    - ax_grid: axes array returned by az.plot_pair(...)
+    - X: (n_draws, n_vars) samples in the same order as `names`
+    - names: list[str] matching the columns of X
+    - label_map: optional dict name->latex label (e.g. from ppp_labels.LATEX_LABELS)
+    """
+    A = np.asarray(ax_grid)
+    if box_kw is None:
+        box_kw = dict(facecolor="white", edgecolor="none", alpha=0.7, pad=2.5)
+
+    # corner positions in Axes coordinates
+    pos = {
+        "ur": (0.98, 0.98, "right", "top"),
+        "ul": (0.02, 0.98, "left",  "top"),
+        "lr": (0.98, 0.02, "right", "bottom"),
+        "ll": (0.02, 0.02, "left",  "bottom"),
+    }
+    x0, y0, ha, va = pos.get(loc, pos["ur"])
+
+    print(len(names), X.shape, A.shape)
+
+    for i, nm in enumerate(names):
+        ax = A[i, i]
+        # robust percentiles
+        p16, p50, p84 = np.nanpercentile(X[:, i], [16.0, 50.0, 84.0])
+        errm = p50 - p16
+        errp = p84 - p50
+
+        # choose label
+        base = label_map.get(nm, nm) if label_map else nm
+        base = _wrap_math(base)
+
+        # build TeX: median^{+errp}_{-errm}
+        # Note: base is a separate axis label; here we just print the numbers.
+        # If you want the parameter name included in the box, prepend f"{base} = "
+        txt = rf"${p50:{fmt}}$" + rf"$^{{+{errp:{fmt}}}}" + rf"_{{-{errm:{fmt}}}}$"
+
+        ax.text(
+            x0, y0, txt,
+            transform=ax.transAxes, ha=ha, va=va,
+            fontsize=fontsize, bbox=box_kw, zorder=20,
+        )
+
 
 def load_draws(trace_path):
     idata = az.from_netcdf(trace_path)
@@ -128,6 +189,10 @@ def main():
     ap.add_argument("--ticksize", type=float, default=12.0, help="tick label size")
     ap.add_argument("--labels_module", default="ppp_labels", help="Python module exposing LATEX_LABELS dict")
     ap.add_argument("--usetex", action="store_true", help="Use LaTeX engine (requires system LaTeX); default off")
+    ap.add_argument("--show_log_s_birth", action="store_true",
+                help="Plot log(s_birth) instead of s_birth")
+    ap.add_argument("--log_base", choices=["e","10"], default="10",
+                    help="Base for the log transform of s_birth")
     args = ap.parse_args()
 
     if args.usetex:
@@ -148,12 +213,29 @@ def main():
             print("[warn] Missing variables:", ", ".join(missing))
     else:
         core = ["log10_tau_p", "log10_tau0_Myr", "beta", "h_z_pc",
-                "a0", "a_mu", "a_Av", "a_logM", "s_birth"]
+                "a0", "a_mu", "a_Av", "a_logM", "s_birth", "z_sun_pc"]
         var_list = have_vars(post, core)
         if not var_list:
             var_list = [nm for nm, da in post.data_vars.items() if da.values.ndim == 2]
 
     draws = flatten_scalar_params(post, allow_names=set(var_list), exclude_regex=args.exclude_regex)
+
+
+    if args.show_log_s_birth and "s_birth" in draws:
+        sb = np.clip(draws.pop("s_birth"), 1e-300, np.inf)   # safety clip
+        if args.log_base == "10":
+            draws["log10_s_birth"] = np.log10(sb)
+            # optional: keep order consistent
+            if "s_birth" in var_list:
+                var_list[var_list.index("s_birth")] = "log10_s_birth"
+            else:
+                var_list.append("log10_s_birth")
+        else:
+            draws["ln_s_birth"] = np.log(sb)
+            if "s_birth" in var_list:
+                var_list[var_list.index("s_birth")] = "ln_s_birth"
+            else:
+                var_list.append("ln_s_birth")
 
     # Add derived taus
     if args.add_tau_derived:
@@ -169,6 +251,8 @@ def main():
 
     # Build LaTeX labels
     labels_tex = [to_tex(label_map.get(nm, nm)) for nm in names]
+
+    print(names, labels_tex, X.shape)
 
     # Try corner first (if requested)
     use_corner = False
@@ -210,9 +294,55 @@ def main():
         plt.close(fig)
         print(f"[OK] saved corner plot to {args.out}" + (f" and {args.out_pdf}" if args.out_pdf else ""))
     else:
+
+        def debug_X(X, names):
+            for i, nm in enumerate(names):
+                col = X[:, i]
+                n_nan = np.isnan(col).sum()
+                n_inf = np.isinf(col).sum()
+                std = np.nanstd(col)
+                print(f"[diag] {nm}: n_nan={n_nan}, n_inf={n_inf}, std={std:.3e}, "
+                    f"range=({np.nanmin(col):.3g},{np.nanmax(col):.3g})")
+
+        def sanitize_X(X, names, jitter_frac=1e-6, max_drop=0.2, rng=None):
+            """Remove rows with any non-finite, and add tiny jitter to zero-variance cols."""
+            if rng is None:
+                rng = np.random.default_rng(42)
+            # 1) drop any row with a NaN/Inf
+            mask = np.all(np.isfinite(X), axis=1)
+            kept = mask.sum()
+            if kept < X.shape[0]:
+                frac = 1 - kept / X.shape[0]
+                print(f"[sanitize] dropped {X.shape[0]-kept} rows ({frac:.1%}) with non-finite values")
+                if frac > max_drop:
+                    print("[warn] many non-finite rows; check inputs")
+            X2 = X[mask]
+
+            # 2) jitter zero-variance cols so KDE doesn't choke
+            for i in range(X2.shape[1]):
+                col = X2[:, i]
+                s = np.nanstd(col)
+                if not np.isfinite(s) or s == 0.0:
+                    # use scale ~ jitter_frac * (|median| + 1) to avoid zero
+                    scale = jitter_frac * (abs(np.nanmedian(col)) + 1.0)
+                    X2[:, i] = col + rng.normal(0.0, scale, size=col.shape)
+                    print(f"[sanitize] jittered column '{names[i]}' with σ={scale:.3e}")
+            return X2
+
+        # Pre-flight diagnostics
+        #debug_X(X, names)
+
+        # Clean up for ArviZ
+        #X_clean = sanitize_X(X, names)
+
         # ArviZ fallback: build an InferenceData with scalar arrays keyed by ORIGINAL names
         data_for_az = {nm: X[:, i] for i, nm in enumerate(names)}
-        id_for_plot = az.from_dict(posterior={k: v[:, None] for k, v in data_for_az.items()})
+        print(len(data_for_az))
+        id_for_plot = az.from_dict(posterior={k: v[None, :] for k, v in data_for_az.items()})
+
+        data_for_az = {nm: X[:, i] for i, nm in enumerate(names)}  # 1D arrays, length n_draws
+        id_for_plot = az.from_dict(posterior={k: v[None, :] for k, v in data_for_az.items()})
+        print(len(id_for_plot))
         # Map labels
         labeller = az.labels.MapLabeller(var_name_map={nm: labels_tex[i] for i, nm in enumerate(names)})
 
@@ -236,6 +366,19 @@ def main():
             labeller=labeller,
             textsize=args.fontsize,
             figsize=(3*len(names), 3*len(names)),
+        )
+
+        try:
+            from ppp_labels import LATEX_LABELS as LBL
+        except Exception:
+            LBL = {}
+
+        annotate_diag_stats(
+            ax, X, names,
+            label_map=LBL,   # or {} if you don't want names in the box
+            fmt=".2f",       # tweak precision as needed
+            loc="ur",        # upper-right corner
+            fontsize=args.fontsize,   # keep consistent with your figure
         )
         # ax can be np.ndarray of axes; make all ticks larger
         for a in np.ravel(ax):

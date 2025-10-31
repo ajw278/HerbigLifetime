@@ -22,8 +22,14 @@ LATEX_LABELS = {
     # Global birth-rate scale
     "s_birth":          r"s_{\rm birth}",
 
+    # Solar height above mid-plane
+    "z_sun_pc": r"z_\odot\ [{\rm pc}]",
+
     # Optional derived lifetime summaries (script adds these when requested)
     "log10_tau@1.5Msun": r"\log_{10}\,\tau(1.5\,M_\odot)\ [{\rm yr}]",
     "log10_tau@2.5Msun": r"\log_{10}\,\tau(2.5\,M_\odot)\ [{\rm yr}]",
     "log10_tau@8.0Msun": r"\log_{10}\,\tau(8.0\,M_\odot)\ [{\rm yr}]",
+    
+    "log10_s_birth": r"\log_{10}\,s_{\rm birth}",
+    "ln_s_birth":    r"\ln\,s_{\rm birth}"
 }
