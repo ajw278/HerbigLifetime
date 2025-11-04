@@ -33,6 +33,7 @@ import arviz as az
 import healpy as hp
 import matplotlib.pyplot as plt
 from utils import  xi_norm_on_interval
+from mpl_setup import *
 
 DEG2_PER_SR = (180.0/np.pi)**2
 
@@ -475,16 +476,13 @@ def main():
         return DT(1.0) / (DT(1.0) + np.exp(-x, dtype=DT))'''
 
     for i0 in range(0, npix, B):
-        print(i0, npix, B )
         i1   = min(npix, i0 + B)
         mu_b = mu[i0:i1]          # (B,Kd)
         Av_b = Av[i0:i1]          # (B,Kd)
 
         # base term independent of M
         base = a0 + a_mu * (mu_b - mu_ref) + a_Av * (kL * Av_b)   # (B, Kd), DT
-        print("\n\n\nShowing base termsf or first pixel in block:")
-        print("base:", base, "a0:", a0, "a_mu:", a_mu, "mu_ref:", mu_ref, "a_Av:", a_Av, "kL:", kL, "Av_b:", Av_b)
-
+        
         eff  = np.zeros_like(base, dtype=DT)                       # (B, Kd)
 
         for m in range(logM_vec.size):
@@ -492,8 +490,6 @@ def main():
             wt = w_tau_vec[m].item()     # Python float
 
             eta_m = base + a_logM * lm   # (B, Kd)
-            print("eta_m:", eta_m, "a_logM:", a_logM, "lm:", lm)
-            
 
             # stable logistic to avoid overflow
             p = np.where(

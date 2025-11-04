@@ -20,10 +20,115 @@ import numpy as np
 # PyMC 5 / PyTensor
 import pymc as pm
 import pytensor.tensor as pt
-from utils import chabrier2003_unnorm_pdf, xi_norm_on_interval
+from utils import  xi_norm_on_interval
 
 # ---------- helpers ----------
 SQ2PI = np.sqrt(2.0 * np.pi)
+
+import numpy as np
+
+def load_grid_standardized(path):
+    """
+    Load a PPP grid pack and return a standardized view that works for BOTH:
+      - rectangular packs (npix × Kd), possibly flattened, and
+      - ragged packs (per-pixel variable Kd) with row_ptr.
+
+    Returns a dict with 1-D cellwise arrays:
+      npix:int
+      ragged:bool
+      Gcells:int
+      row_ptr: (npix+1,) int64 or None
+      mu: (Gcells,) float64                 distance modulus per cell (center)
+      z:  (Gcells,) float64                 z (pc) per cell (center)
+      dV: (Gcells,) float64                 cell volumes (pc^3)
+      Sigma_birth: (Gcells,) float64        stars / (yr pc^2) at cell center
+      Av: (Gcells,) float64                 A_V to the cell center (0 if missing)
+      footprint: (Gcells,) bool             valid mask
+    """
+    P = np.load(path, allow_pickle=True)
+    files = set(P.files)
+
+    def as1d(name, default=None, dtype=np.float64):
+        if name not in P.files:
+            if default is None:
+                raise KeyError(f"[grid] missing '{name}'")
+            arr = np.asarray(default, dtype=dtype)
+        else:
+            arr = np.asarray(P[name], dtype=dtype)
+        if arr.ndim > 1:
+            arr = arr.ravel()
+        return arr
+
+    # Detect ragged/adaptive pack via 'row_ptr'
+    if "row_ptr" in files:
+        row_ptr = np.asarray(P["row_ptr"], dtype=np.int64)
+        npix = int(row_ptr.size - 1)
+        Gcells = int(row_ptr[-1])
+        ragged = True
+
+        mu  = as1d("mu")
+        z   = as1d("z_pc")
+        dV  = as1d("dV_pc3")
+        Sig = as1d("Sigma_birth_yr_pc2")
+        Av  = as1d("A_V", default=np.zeros(Gcells, float)) if ("A_V" in files) else np.zeros(Gcells, float)
+
+        fp = np.asarray(P["footprint"]).astype(bool)
+        if fp.ndim > 1:
+            fp = fp.ravel()
+        if fp.size != Gcells:
+            # be forgiving: if someone saved per-pixel, broadcast
+            if fp.size == npix:
+                fp = np.repeat(fp, np.diff(row_ptr))
+            else:
+                raise ValueError(f"[grid] 'footprint' size {fp.size} != Gcells {Gcells}")
+
+        return dict(npix=npix, ragged=ragged, Gcells=Gcells, row_ptr=row_ptr,
+                    mu=mu.astype(float), z=z.astype(float), dV=dV.astype(float),
+                    Sigma_birth=Sig.astype(float), Av=Av.astype(float),
+                    footprint=fp)
+
+    # Rectangular (legacy) pack
+    # We accept either flattened (Gcells,) or (npix, Kd).
+    ragged = False
+    if "npix" in files:
+        npix = int(P["npix"])
+    else:
+        # try to infer from something 2D
+        npix = None
+
+    def flatten2d(name, fallback=None, dtype=np.float64):
+        if name not in P.files:
+            if fallback is None:
+                raise KeyError(f"[grid] missing '{name}'")
+            arr = np.asarray(fallback, dtype=dtype)
+        else:
+            arr = np.asarray(P[name], dtype=dtype)
+        if arr.ndim == 2:
+            return arr.reshape(-1)
+        return arr
+
+    # Prefer directly stored quantities
+    mu  = flatten2d("mu")
+    z   = flatten2d("z_pc")
+    dV  = flatten2d("dV_pc3")
+    Sig = flatten2d("Sigma_birth_yr_pc2")
+    Av  = flatten2d("A_V", fallback=np.zeros_like(mu))
+
+    fp = np.asarray(P["footprint"]).astype(bool) if "footprint" in files else np.ones_like(mu, bool)
+    if fp.ndim > 1:
+        fp = fp.ravel()
+
+    # Consistency
+    Gcells = mu.size
+    if not (z.size == dV.size == Sig.size == fp.size == Gcells):
+        raise ValueError("[grid] field sizes are inconsistent after flattening.")
+
+    return dict(npix=int(npix) if npix is not None else -1,
+                ragged=ragged, Gcells=Gcells, row_ptr=None,
+                mu=mu.astype(float), z=z.astype(float), dV=dV.astype(float),
+                Sigma_birth=Sig.astype(float), Av=Av.astype(float),
+                footprint=fp)
+
 
 # ---------- main ----------
 def main():
@@ -49,21 +154,20 @@ def main():
     M = np.load(args.mass_pack, allow_pickle=True)
     S = np.load(args.star_marg_pack, allow_pickle=True)
 
-    # ---------- GRID (flattened: length Gcells = npix*Nshell) ----------
-    # SANITIZE grid arrays
-    footprint = G["footprint"].astype(bool)
-    Sigma_birth = G["Sigma_birth_yr_pc2"].astype(np.float64)
-    Sigma_birth = np.where(np.isfinite(Sigma_birth) & footprint, Sigma_birth, 0.0)
+    # ---------- GRID (works for rectangular or ragged) ----------
+    grid = load_grid_standardized(args.grid_pack)
 
-    z_grid  = np.nan_to_num(G["z_pc"].astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
-    mu_grid = np.nan_to_num(G["mu"].astype(np.float64),   nan=0.0, posinf=0.0, neginf=0.0)
-    dV_grid = G["dV_pc3"].astype(np.float64)
-    dV_grid = np.where(np.isfinite(dV_grid), dV_grid, 0.0)
+    footprint   = grid["footprint"]
+    Sigma_birth = np.where(np.isfinite(grid["Sigma_birth"]) & footprint, grid["Sigma_birth"], 0.0)
 
-    if "A_V" in G.files:
-        Av_grid = np.nan_to_num(G["A_V"].astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
-    else:
-        Av_grid = np.zeros_like(mu_grid)
+    z_grid  = np.nan_to_num(grid["z"],  nan=0.0, posinf=0.0, neginf=0.0)
+    mu_grid = np.nan_to_num(grid["mu"], nan=0.0, posinf=0.0, neginf=0.0)
+    dV_grid = np.where(np.isfinite(grid["dV"]), grid["dV"], 0.0)
+
+    Av_grid = grid["Av"] if grid["Av"].size else np.zeros_like(mu_grid)
+    Av_grid = np.nan_to_num(Av_grid, nan=0.0, posinf=0.0, neginf=0.0)
+
+    footprint_f = footprint.astype(np.float64)  # 1.0 in support, 0.0 outside)
 
     # ---------- MASS QUADRATURE (Herbig range) ----------
     Mq   = M["Mq"].astype(np.float64)    # (Q,)

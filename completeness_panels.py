@@ -23,6 +23,7 @@ import argparse, os, sys
 import numpy as np
 import arviz as az
 import matplotlib.pyplot as plt
+from mpl_setup import *
 
 try:
     import pandas as pd
@@ -68,6 +69,7 @@ def assign_panels_by_edges(M_star, edges):
     # clamp outside to nearest valid bin
     idx = np.clip(idx, 0, len(edges)-2)
     return idx
+
 def load_pack_Av_stats(pack_path):
     P = np.load(pack_path, allow_pickle=True)
     # find A_V nodes
@@ -297,6 +299,7 @@ def main():
 
 
     # sanitize finite
+    print(d, Av, M)
     mask = np.isfinite(d) & np.isfinite(Av) & np.isfinite(M)
     if ed is not None: mask &= np.isfinite(ed)
     if eA is not None: mask &= np.isfinite(eA)

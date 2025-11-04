@@ -13,10 +13,8 @@ az.rcParams["plot.max_subplots"] = 200
 
 def _wrap_math(label):
     # If it's already $...$, leave it; else wrap for mathtext.
-    print(label)
     if isinstance(label, str) and label.startswith("$") and label.endswith("$"):
         return label
-    print("wrapping")
     return f"${label}$"
 
 def annotate_diag_stats(
@@ -46,7 +44,6 @@ def annotate_diag_stats(
     }
     x0, y0, ha, va = pos.get(loc, pos["ur"])
 
-    print(len(names), X.shape, A.shape)
 
     for i, nm in enumerate(names):
         ax = A[i, i]
