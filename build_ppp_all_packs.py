@@ -289,6 +289,21 @@ def main():
     b_rad = np.radians(b_deg)[:, None]
     delta_omega = 4.0*np.pi/npix
 
+     # ---- Per-star packs ----
+    cat = pd.read_csv(args.tsv, sep="\t")
+    if not {"ra","dec","distance"}.issubset(cat.columns):
+        raise SystemExit("TSV must include: ra, dec, distance (pc)")
+    ra = cat["ra"].to_numpy(float); dec = cat["dec"].to_numpy(float)
+    d_obs = cat["distance"].to_numpy(float)
+    d_min = cat["min_dist"].to_numpy(float) if "min_dist" in cat.columns else np.full_like(d_obs, np.nan)
+    d_max = cat["max_dist"].to_numpy(float) if "max_dist" in cat.columns else np.full_like(d_obs, np.nan)
+    M_obs = cat["Mstar"].to_numpy(float) if "Mstar" in cat.columns else np.full_like(d_obs, np.nan)
+    # Mass-error column: use user-specified name or default to the last column in the file
+    if args.mass_err_col and args.mass_err_col in cat.columns:
+        M_err_raw = cat[args.mass_err_col].to_numpy(float)
+    else:
+        M_err_raw = cat.iloc[:, -1].to_numpy(float)  # last column
+
     # Star → pixel assignment and per-pixel sorted distances
     pix, l_star_rad, b_star_rad = pix_indices_for_stars(args.nside, ra, dec)
     perpix_d_sorted = per_pixel_sorted_distances(npix, pix, d_obs)
@@ -392,20 +407,20 @@ def main():
 
     else:
         edges   = np.arange(args.dmin, args.dmax + args.dr, args.dr)
-        centers = 0.5 * (edges[:-1] + edges[1:])
-        dd      = np.diff(edges)                  # shape (Nshell,)
-        d_shell = centers[None, :]                # shape (1, Nshell)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    dd      = np.diff(edges)                  # shape (Nshell,)
+    d_shell = centers[None, :]                # shape (1, Nshell)
 
-        # Geometry broadcast (unchanged)
-        cosb, sinb = np.cos(b_rad), np.sin(b_rad)
-        cosl, sinl = np.cos(l_rad), np.sin(l_rad)
-        X = d_shell * cosb * cosl                 # (npix, Nshell)
-        Y = d_shell * cosb * sinl                 # (npix, Nshell)
-        Z = d_shell * sinb                        # (npix, Nshell)
+    # Geometry broadcast (unchanged)
+    cosb, sinb = np.cos(b_rad), np.sin(b_rad)
+    cosl, sinl = np.cos(l_rad), np.sin(l_rad)
+    X = d_shell * cosb * cosl                 # (npix, Nshell)
+    Y = d_shell * cosb * sinl                 # (npix, Nshell)
+    Z = d_shell * sinb                        # (npix, Nshell)
 
-        # --- NEW: tile distance- and shell-only arrays across pixels ---
-        d_full  = np.repeat(d_shell, npix, axis=0)        # (npix, Nshell)
-        mu_full = distance_modulus(d_full)                # (npix, Nshell)
+    # --- NEW: tile distance- and shell-only arrays across pixels ---
+    d_full  = np.repeat(d_shell, npix, axis=0)        # (npix, Nshell)
+    mu_full = distance_modulus(d_full)                # (npix, Nshell)
 
     # Volume element per cell: ΔV = d^2 Δd ΔΩ ; same for every pixel at a given shell,
     # so compute the shell value then repeat across pixels.
@@ -481,20 +496,7 @@ def main():
     np.savez_compressed(f"{args.out_prefix}_mass_pack.npz", **mass_pack)
     print(f"[OK] mean IMF mass <M> = {Mbar:.3f} Msun -> wrote {args.out_prefix}_mass_pack.npz", file=sys.stderr)
 
-    # ---- Per-star packs ----
-    cat = pd.read_csv(args.tsv, sep="\t")
-    if not {"ra","dec","distance"}.issubset(cat.columns):
-        raise SystemExit("TSV must include: ra, dec, distance (pc)")
-    ra = cat["ra"].to_numpy(float); dec = cat["dec"].to_numpy(float)
-    d_obs = cat["distance"].to_numpy(float)
-    d_min = cat["min_dist"].to_numpy(float) if "min_dist" in cat.columns else np.full_like(d_obs, np.nan)
-    d_max = cat["max_dist"].to_numpy(float) if "max_dist" in cat.columns else np.full_like(d_obs, np.nan)
-    M_obs = cat["Mstar"].to_numpy(float) if "Mstar" in cat.columns else np.full_like(d_obs, np.nan)
-    # Mass-error column: use user-specified name or default to the last column in the file
-    if args.mass_err_col and args.mass_err_col in cat.columns:
-        M_err_raw = cat[args.mass_err_col].to_numpy(float)
-    else:
-        M_err_raw = cat.iloc[:, -1].to_numpy(float)  # last column
+   
 
     # Helper to convert errors to σ_log10M (dex)
     LOG10_E = 1.0 / np.log(10.0)   # ≈ 0.4343

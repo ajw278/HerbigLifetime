@@ -150,7 +150,6 @@ def main():
     args = ap.parse_args()
 
     # ---- load packs ----
-    G = np.load(args.grid_pack, allow_pickle=True)
     M = np.load(args.mass_pack, allow_pickle=True)
     S = np.load(args.star_marg_pack, allow_pickle=True)
 
