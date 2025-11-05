@@ -1,6 +1,8 @@
 python build_ppp_all_packs.py --sfr_npz sfr_grid_xy_from_dust.npz --tsv herbig_data.tsv --out_prefix ppp --nside 32 --dmin 20.0 --dmax 1250.0 --dr 25.0 --Mmin_all 0.08 --Mmax_all 120.0 --Mmin_herbig 1.5 --Mmax_herbig 12.0 --Mq 48 --k_d 7 --k_m 5 --sigma_logM 0.2 --d_sigma_frac 0.10 --add_av_grid --dust_dir ~/.dustmaps --max_per_cell 2 --adaptive_radial
 
-python count_per_pixel.py  --grid_pack ppp_grid_pack.npz --catalog herbig_data.tsv  --col_mass Mstar
+python count_per_cell.py   --grid_pack ppp_grid_pack.npz   --catalog herbig_data.tsv   --minN 2 --max_print 200 --use_names   --save_tsv cells_ge2.tsv
+
+python ppp_likelihood_pymc.py  --grid_pack ppp_grid_pack.npz --star_marg_pack ppp_star_marg_pack.npz --draws 1000 --tune 1000 --out ppp_trace_t03_ragged.nc --zsun_sigma_pc 10.0 --mass_pack ppp_mass_pack.npz  --sample
 
 python map_expected_herbig_healpix.py  --grid_pack ppp_grid_pack.npz --trace ppp_trace_t03.nc  --catalog herbig_data.tsv   --col_mass Mstar  --Mmin 2 --Mmax 3 --Mq 32  --mu_ref 10.0 --k_lambda 1.0  --dtype float32 --chunk_pix 128 --per_sr  --make_obs_map --smooth_fwhm_deg 30 --side_by_side  --out expected_vs_observed_2to3Msun.png
 

@@ -39,9 +39,12 @@ _HAVE_DUST = True
 try:
     from dustmaps.config import config as dustmaps_config
     from dustmaps.edenhofer2023 import Edenhofer2023Query
+    q = Edenhofer2023Query(integrated=True, load_samples=False)
 except Exception as e:
     _HAVE_DUST = False
     DUST_ERR = str(e)
+
+    
 
 def pix_indices_for_stars(nside, ra_deg, dec_deg):
     sky = SkyCoord(ra_deg*u.deg, dec_deg*u.deg, frame="icrs").galactic
@@ -194,7 +197,6 @@ def query_av_integrated(l_rad, b_rad, d_pc, chunk=200_000):
     """
     if not _HAVE_DUST:
         raise RuntimeError(f"dustmaps not available: {DUST_ERR}")
-    q = Edenhofer2023Query(integrated=True, load_samples=False)
     N = d_pc.size
     out = np.zeros(N, float)
     i = 0
@@ -405,86 +407,105 @@ def main():
         np.savez_compressed(f"{args.out_prefix}_grid_pack.npz", **grid_pack)
         print(f"[OK] wrote {args.out_prefix}_grid_pack.npz (ragged, G={Gtot})", file=sys.stderr)
 
+        # Final summary
+        n_cells = Gtot
+        n_valid = int(np.count_nonzero(grid_pack["footprint"]))
+        print(f"[summary] cells={n_cells}, with Σ_SFR support={n_valid} ({100*n_valid/n_cells:.1f}%)", file=sys.stderr)
+        print(f"[summary] IMF <M>={Mbar:.3f} Msun; Herbig quadrature nodes={args.Mq}", file=sys.stderr)
+        if args.add_av_grid:
+            print(f"[summary] A_V grid included: {Av_f is not None}", file=sys.stderr)
+
     else:
         edges   = np.arange(args.dmin, args.dmax + args.dr, args.dr)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    dd      = np.diff(edges)                  # shape (Nshell,)
-    d_shell = centers[None, :]                # shape (1, Nshell)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        dd      = np.diff(edges)                  # shape (Nshell,)
+        d_shell = centers[None, :]                # shape (1, Nshell)
 
-    # Geometry broadcast (unchanged)
-    cosb, sinb = np.cos(b_rad), np.sin(b_rad)
-    cosl, sinl = np.cos(l_rad), np.sin(l_rad)
-    X = d_shell * cosb * cosl                 # (npix, Nshell)
-    Y = d_shell * cosb * sinl                 # (npix, Nshell)
-    Z = d_shell * sinb                        # (npix, Nshell)
+        # Geometry broadcast (unchanged)
+        cosb, sinb = np.cos(b_rad), np.sin(b_rad)
+        cosl, sinl = np.cos(l_rad), np.sin(l_rad)
+        X = d_shell * cosb * cosl                 # (npix, Nshell)
+        Y = d_shell * cosb * sinl                 # (npix, Nshell)
+        Z = d_shell * sinb                        # (npix, Nshell)
 
-    # --- NEW: tile distance- and shell-only arrays across pixels ---
-    d_full  = np.repeat(d_shell, npix, axis=0)        # (npix, Nshell)
-    mu_full = distance_modulus(d_full)                # (npix, Nshell)
+        # --- NEW: tile distance- and shell-only arrays across pixels ---
+        d_full  = np.repeat(d_shell, npix, axis=0)        # (npix, Nshell)
+        mu_full = distance_modulus(d_full)                # (npix, Nshell)
 
-    # Volume element per cell: ΔV = d^2 Δd ΔΩ ; same for every pixel at a given shell,
-    # so compute the shell value then repeat across pixels.
-    dV_shell = (d_shell**2) * dd[None, :] * delta_omega   # (1, Nshell)
-    dV       = np.repeat(dV_shell, npix, axis=0)          # (npix, Nshell)
+        # Volume element per cell: ΔV = d^2 Δd ΔΩ ; same for every pixel at a given shell,
+        # so compute the shell value then repeat across pixels.
+        dV_shell = (d_shell**2) * dd[None, :] * delta_omega   # (1, Nshell)
+        dV       = np.repeat(dV_shell, npix, axis=0)          # (npix, Nshell)
 
-    # Evaluate Σ_SFR on grid
-    pts = np.stack([Y.ravel(), X.ravel()], axis=1)
-    S_vals = S_interp(pts).reshape(X.shape)  # Msun/yr/kpc^2
-    footprint = np.isfinite(S_vals) & (S_vals > 0)
+        # Evaluate Σ_SFR on grid
+        pts = np.stack([Y.ravel(), X.ravel()], axis=1)
+        S_vals = S_interp(pts).reshape(X.shape)  # Msun/yr/kpc^2
+        footprint = np.isfinite(S_vals) & (S_vals > 0)
 
-    # Σ_birth per pc^2
-    Sigma_birth_pc2 = (S_vals / max(Mbar, 1e-9)) / 1e6  # stars/yr/pc^2
+        # Σ_birth per pc^2
+        Sigma_birth_pc2 = (S_vals / max(Mbar, 1e-9)) / 1e6  # stars/yr/pc^2
+        # ---- Save grid_pack ----
+        G = npix * centers.size
+        flat = lambda A: A.reshape(G)
+
+        Av_grid = None
+        if args.add_av_grid:
+            if not _HAVE_DUST:
+                print(f"[warn] dustmaps not available; skipping A_V grid: {DUST_ERR}", file=sys.stderr)
+            else:
+                if args.dust_dir:
+                    dustmaps_config["data_dir"] = args.dust_dir
+                if args.fetch_dust:
+                    # fetch lazily only if needed
+                    try:
+                        import dustmaps.edenhofer2023 as eden
+                        eden.fetch()
+                    except Exception as e:
+                        print(f"[warn] dust fetch failed: {e}", file=sys.stderr)
+                print("[info] querying A_V grid...", file=sys.stderr)
+                # Flatten (l,b,d) for query
+                l_flat = np.repeat(l_rad, centers.size, axis=1).ravel()
+                b_flat = np.repeat(b_rad, centers.size, axis=1).ravel()
+                d_flat = np.repeat(d_shell,     npix,          axis=0).ravel()
+                Av_flat = query_av_integrated(l_flat, b_flat, d_flat, chunk=200_000)
+                Av_grid = Av_flat.reshape(X.shape)  # (npix, Nshell)
 
 
-    # Optional A_V grid
-    Av_grid = None
-    if args.add_av_grid:
-        if not _HAVE_DUST:
-            print(f"[warn] dustmaps not available; skipping A_V grid: {DUST_ERR}", file=sys.stderr)
-        else:
-            if args.dust_dir:
-                dustmaps_config["data_dir"] = args.dust_dir
-            if args.fetch_dust:
-                # fetch lazily only if needed
-                try:
-                    import dustmaps.edenhofer2023 as eden
-                    eden.fetch()
-                except Exception as e:
-                    print(f"[warn] dust fetch failed: {e}", file=sys.stderr)
-            print("[info] querying A_V grid...", file=sys.stderr)
-            # Flatten (l,b,d) for query
-            l_flat = np.repeat(l_rad, centers.size, axis=1).ravel()
-            b_flat = np.repeat(b_rad, centers.size, axis=1).ravel()
-            d_flat = np.repeat(d_shell,     npix,          axis=0).ravel()
-            Av_flat = query_av_integrated(l_flat, b_flat, d_flat, chunk=200_000)
-            Av_grid = Av_flat.reshape(X.shape)  # (npix, Nshell)
+        grid_pack = dict(
+            nside=np.int32(args.nside),
+            npix=np.int32(npix),
+            dmin=args.dmin, dmax=args.dmax, dr=args.dr,
+            ell=flat(np.repeat(l_rad, centers.size, axis=1)).astype(np.float32),
+            bee=flat(np.repeat(b_rad, centers.size, axis=1)).astype(np.float32),
+            x_pc=flat(X).astype(np.float32),
+            y_pc=flat(Y).astype(np.float32),
+            z_pc=flat(Z).astype(np.float32),
+            d_pc=flat(d_full).astype(np.float32),           # was: np.repeat(d, npix, axis=0)
+            mu=flat(mu_full).astype(np.float32),            # was: flat(mu)
+            dV_pc3=flat(dV).astype(np.float32),             # was: flat(dV) with shape (1, Nshell)
+            delta_d_pc=np.repeat(dd, npix).astype(np.float32),
+            delta_omega_sr=np.full(G, delta_omega, dtype=np.float32),
+            Sigma_SFR_Msun_yr_kpc2=flat(S_vals).astype(np.float32),
+            Sigma_birth_yr_pc2=flat(Sigma_birth_pc2).astype(np.float32),
+            footprint=flat(footprint).astype(np.bool_)
+        )
+        if Av_grid is not None:
+            grid_pack["A_V"] = flat(Av_grid).astype(np.float32)
 
-    # ---- Save grid_pack ----
-    G = npix * centers.size
-    flat = lambda A: A.reshape(G)
-    grid_pack = dict(
-        nside=np.int32(args.nside),
-        npix=np.int32(npix),
-        dmin=args.dmin, dmax=args.dmax, dr=args.dr,
-        ell=flat(np.repeat(l_rad, centers.size, axis=1)).astype(np.float32),
-        bee=flat(np.repeat(b_rad, centers.size, axis=1)).astype(np.float32),
-        x_pc=flat(X).astype(np.float32),
-        y_pc=flat(Y).astype(np.float32),
-        z_pc=flat(Z).astype(np.float32),
-        d_pc=flat(d_full).astype(np.float32),           # was: np.repeat(d, npix, axis=0)
-        mu=flat(mu_full).astype(np.float32),            # was: flat(mu)
-        dV_pc3=flat(dV).astype(np.float32),             # was: flat(dV) with shape (1, Nshell)
-        delta_d_pc=np.repeat(dd, npix).astype(np.float32),
-        delta_omega_sr=np.full(G, delta_omega, dtype=np.float32),
-        Sigma_SFR_Msun_yr_kpc2=flat(S_vals).astype(np.float32),
-        Sigma_birth_yr_pc2=flat(Sigma_birth_pc2).astype(np.float32),
-        footprint=flat(footprint).astype(np.bool_)
-    )
-    if Av_grid is not None:
-        grid_pack["A_V"] = flat(Av_grid).astype(np.float32)
+        np.savez_compressed(f"{args.out_prefix}_grid_pack.npz", **grid_pack)
+        print(f"[OK] wrote {args.out_prefix}_grid_pack.npz", file=sys.stderr)
 
-    np.savez_compressed(f"{args.out_prefix}_grid_pack.npz", **grid_pack)
-    print(f"[OK] wrote {args.out_prefix}_grid_pack.npz", file=sys.stderr)
+        
+        # Final summary
+        n_cells = G
+        n_valid = int(np.count_nonzero(grid_pack["footprint"]))
+        print(f"[summary] cells={n_cells}, with Σ_SFR support={n_valid} ({100*n_valid/n_cells:.1f}%)", file=sys.stderr)
+        print(f"[summary] IMF <M>={Mbar:.3f} Msun; Herbig quadrature nodes={args.Mq}", file=sys.stderr)
+        if args.add_av_grid:
+            print(f"[summary] A_V grid included: {Av_grid is not None}", file=sys.stderr)
+
+
+        
 
     # ---- Save mass_pack ----
     mass_pack = dict(
@@ -681,13 +702,6 @@ def main():
         np.savez_compressed(args.combined_npz, **combo)
         print(f"[OK] wrote combined bundle: {args.combined_npz}", file=sys.stderr)
 
-    # Final summary
-    n_cells = G
-    n_valid = int(np.count_nonzero(grid_pack["footprint"]))
-    print(f"[summary] cells={n_cells}, with Σ_SFR support={n_valid} ({100*n_valid/n_cells:.1f}%)", file=sys.stderr)
-    print(f"[summary] IMF <M>={Mbar:.3f} Msun; Herbig quadrature nodes={args.Mq}", file=sys.stderr)
-    if args.add_av_grid:
-        print(f"[summary] A_V grid included: {Av_grid is not None}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
