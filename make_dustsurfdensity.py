@@ -342,7 +342,7 @@ def main():
         extent=[xmin, xmax, ymin, ymax],
         origin="lower", aspect="equal"
     )
-    axes[0].scatter(x_star, y_star, s=10)
+    axes[0].scatter(x_star, y_star, s=6, c='r')
     axes[0].set_xlabel("X [pc]"); axes[0].set_ylabel("Y [pc]")
     axes[0].set_title(r"$\Sigma_{\rm dust}$  [M$_\odot$ pc$^{-2}$] (native)")
     cb0 = plt.colorbar(im0, ax=axes[0]); cb0.set_label(r"log$_{10}$ $\Sigma_{\rm dust}$")
@@ -354,7 +354,7 @@ def main():
         origin="lower", aspect="equal",
         vmin=-1, vmax=4.
     )
-    axes[1].scatter(x_star, y_star, s=10)
+    axes[1].scatter(x_star, y_star, s=6, color='r')
     axes[1].set_xlabel("X [pc]"); axes[1].set_ylabel("Y [pc]")
     axes[1].set_title(r"Smoothed $\dot{\Sigma}_{\rm SFR}$  [M$_\odot$ yr$^{-1}$ kpc$^{-2}$]")
     cb1 = plt.colorbar(im1, ax=axes[1]); cb1.set_label(r"log$_{10}$ $\dot{\Sigma}_{\rm SFR}$")
@@ -381,6 +381,21 @@ def main():
             kernel_pc=args.kernel_pc
         ),
     )
+
+        # --- surface-averaged mean Σ_SFR over the valid (non-NaN) map area ---
+    valid = np.isfinite(Sigma_SFR_sm)
+    if np.any(valid):
+        A_pix_kpc2 = (dx_pc/1000.0) * (dy_pc/1000.0)   # pixel area in kpc^2
+        mean_Sigma_SFR = float(np.nanmean(Sigma_SFR_sm[valid]))  # Msun/yr/kpc^2
+        area_kpc2 = float(np.count_nonzero(valid)) * A_pix_kpc2
+        SFR_total = mean_Sigma_SFR * area_kpc2
+
+        print(f"Surface-averaged Σ_SFR (map): {mean_Sigma_SFR:.3e} Msun/yr/kpc^2, {1e6*mean_Sigma_SFR:.3e} Msun/Myr/kpc^2", file=sys.stderr)
+        print(f"Area used: {area_kpc2:.3f} kpc^2 | Total SFR: {1e6*SFR_total:.3e} Msun/Myr", file=sys.stderr)
+        print(f"Quintana et al. 2025 find a star formation rate inside 1 kpc: 2896^+417_-1 Msun/Myr", file=sys.stderr)
+        print(f"Normalisation would need to be adjusted by a factor of {2896.0 / (np.pi*1e6*mean_Sigma_SFR):.3f} to match.", file=sys.stderr)
+    else:
+        print("No valid Σ_SFR pixels to average.", file=sys.stderr)
 
     plt.show()
 if __name__ == "__main__":

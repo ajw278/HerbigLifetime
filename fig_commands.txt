@@ -7,3 +7,30 @@ python ppp_likelihood_pymc.py  --grid_pack ppp_grid_pack.npz --star_marg_pack pp
 python map_expected_herbig_healpix.py  --grid_pack ppp_grid_pack.npz --trace ppp_trace_t03.nc  --catalog herbig_data.tsv   --col_mass Mstar  --Mmin 2 --Mmax 3 --Mq 32  --mu_ref 10.0 --k_lambda 1.0  --dtype float32 --chunk_pix 128 --per_sr  --make_obs_map --smooth_fwhm_deg 30 --side_by_side  --out expected_vs_observed_2to3Msun.png
 
 python completeness_panels.py --trace ppp_trace_t03.nc --dmin 50.0 --dmax 1250.0 --nd 300 --Av_min 0.0 --Av_max 3.7 --masses 2.0 4.0 6.0 8.0 10.0 12.0 --catalog herbig_data.tsv --use_pack_Av --star_marg_pack star_marg_pack.npz  --xlog
+
+
+________
+
+python density_from_avcube.py \         
+  --table2 table2.dat \
+  --avnpz av_per_pc_cache.npz \
+  --out dens_from_av.csv
+
+
+python bhl_accretion.py \               
+  --table2 table2.dat \
+  --dens dens_from_av.csv \
+  --sigma sigma_local.csv \
+  --out bhl_rates.csv \
+  --nsamp 512 \
+  --cs 0.1
+
+
+python plot_bhl_vs_measured.py \
+  --table2 table2.dat \
+  --bhl bhl_rates.csv \
+  --out bhl_vs_measured.png \
+  --maxpoints 100 \
+  --seed 1234 --min-measured 1e-10
+
+
