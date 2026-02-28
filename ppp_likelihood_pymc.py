@@ -130,7 +130,7 @@ def main():
 
     # ---- PyMC model ----
     with pm.Model() as model:
-        # ----- Priors -----
+        '''# ----- Priors -----
         log10_tau0_Myr = pm.Normal("log10_tau0_Myr", mu=np.log10(3.0), sigma=0.2)
         beta           = pm.Normal("beta", mu=-0.7, sigma=1.0)
         h_z_pc         = pm.HalfNormal("h_z_pc", sigma=60.0)
@@ -145,7 +145,65 @@ def main():
         s_birth = pm.LogNormal("s_birth", mu=0.0, sigma=1.0)
 
         # ----- Deterministic components -----
+        tau0_yr = (10.0 ** log10_tau0_Myr) * 1.0e6  # years'''
+
+        # ----- External calibration constants (fixed) -----
+        # Factor needed to bring the Σ_SFR map in line with Quintana+2025 SFR.
+        # This is the "expected" scaling; we let the sampler move around it,
+        # but the prior is informative.
+        sfr_scale_mean = 0.441  # map -> true SFR normalisation
+
+        # ----- Priors -----
+
+        # Lifetime: 1 Msun discs live ~3 Myr with roughly factor ~2 uncertainty.
+        # log10_tau0_Myr prior: ~95% interval ≈ [~1.9, ~4.7] Myr.
+        log10_tau0_Myr = pm.Normal(
+            "log10_tau0_Myr",
+            mu=np.log10(3.0),
+            sigma=0.05,  # tighter than before to force completeness to do the work
+        )
+
+        # Mass dependence of lifetime, still reasonably broad but not crazy-wide.
+        beta = pm.Normal("beta", mu=-1.0, sigma=1.0)
+
+        # Vertical scale height as before (you might tune this separately).
+        h_z_pc = pm.HalfNormal("h_z_pc", sigma=60.0)
+
+        # ---------- Completeness / selection priors ----------
+        # We parameterize priors in terms of intuitive detection behaviour:
+        # - At (mu = mu_ref, Av = 0, M = 1 Msun): p_det ~ 0.8–0.95
+        # - Detection should fall with distance modulus and extinction.
+        # - Detection should increase with stellar mass (Herbigs are bright).
+
+        # Intercept: logit(p_det) at (mu=mu_ref, Av=0, log10M=0).
+        # logit(0.9) ≈ 2.2, allow ~order-unity range.
+        a0 = pm.Normal("a0", mu=2.0, sigma=1.0)
+
+        # Distance-modulus slope: want substantial drop over a few mag.
+        # As a rough anchor: over Δμ ≈ 2 mag, p_det might drop from ~0.9 to ~0.1.
+        # That corresponds to a_mu ≈ -1 to -2; we center at -1 with modest width.
+        a_mu = pm.Normal("a_mu", mu=-1.0, sigma=0.5)
+
+        # Extinction slope: e.g. at Av ≈ 4, p_det falls significantly.
+        # Rough anchor: a_Av ≈ -0.8 to -1.0.
+        a_Av = pm.Normal("a_Av", mu=-0.9, sigma=0.5)
+
+        # Mass slope: more massive (Herbig) stars are easier to detect.
+        # A positive slope of order unity is reasonable; keep fairly tight.
+        a_logM = pm.Normal("a_logM", mu=1.0, sigma=0.5)
+
+        # ---------- Global SFR (birth map) scale ----------
+
+        # We know from the Σ_SFR map vs Quintana+2025 that the *expected* scale
+        # is sfr_scale_mean ≈ 0.441. This is ~ a lower limit.
+
+        s_birth_rel = pm.HalfNormal("s_birth_rel", sigma=0.5)
+        s_birth = sfr_scale_mean * (1.0 + s_birth_rel)
+
+
+        # ----- Deterministic components -----
         tau0_yr = (10.0 ** log10_tau0_Myr) * 1.0e6  # years
+
 
         z_sun_pc = pm.Normal("z_sun_pc", mu=args.zsun_mu_pc, sigma=args.zsun_sigma_pc)
 

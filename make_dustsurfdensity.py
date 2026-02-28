@@ -310,19 +310,36 @@ def main():
     Sigma_gas_safe = np.where(domain, np.maximum(Sigma_gas, floor), floor)
 
     logSigma = np.log(Sigma_gas_safe)
-    mu       = float(np.nanmean(logSigma[domain]))           # mean(log Σ) inside → geometric mean outside
+    logfit=False
+    if logfit:
+        mu       = float(np.nanmean(logSigma[domain]))           # mean(log Σ) inside → geometric mean outside
 
-    # de-mean within domain; zero outside so cval=0 matches
-    arr = np.where(domain, logSigma - mu, 0.0)
-    w   = np.where(domain, 1.0, 0.0)
+        # de-mean within domain; zero outside so cval=0 matches
+        arr = np.where(domain, logSigma - mu, 0.0)
+        w   = np.where(domain, 1.0, 0.0)
 
-    num = gaussian_filter(arr, sigma=(sigma_y_pix, sigma_x_pix), mode="constant", cval=0.0)
-    den = gaussian_filter(w,   sigma=(sigma_y_pix, sigma_x_pix), mode="constant", cval=0.0)
+        num = gaussian_filter(arr, sigma=(sigma_y_pix, sigma_x_pix), mode="constant", cval=0.0)
+        den = gaussian_filter(w,   sigma=(sigma_y_pix, sigma_x_pix), mode="constant", cval=0.0)
+        eps = 1e-6  # linear-space threshold on weights
+        logSigma_sm  = np.where(den > eps, mu + num/den, mu)
+        Sigma_gas_sm = np.exp(logSigma_sm)
 
-    eps = 1e-6  # linear-space threshold on weights
-    logSigma_sm  = np.where(den > eps, mu + num/den, mu)
-    Sigma_gas_sm = np.exp(logSigma_sm)
+    else:
+        mu       = float(np.nanmean(Sigma_gas[domain]))           # mean(Σ) inside → arithmetic mean outside
 
+        # de-mean within domain; zero outside so cval=0 matches
+        arr = np.where(domain, Sigma_gas - mu, 0.0)
+        w   = np.where(domain, 1.0, 0.0)
+
+        num = gaussian_filter(arr, sigma=(sigma_y_pix, sigma_x_pix), mode="constant", cval=0.0)
+        den = gaussian_filter(w,   sigma=(sigma_y_pix, sigma_x_pix), mode="constant", cval=0.0)
+
+        eps = 1e-6  # linear-space threshold on weights
+        Sigma_gas_sm = np.where(den > eps, mu + num/den, mu) 
+        logSigma_sm = np.log(Sigma_gas_sm)
+    
+
+    
     # --- K–S on the smoothed gas ---
     Sigma_SFR_sm = args.ks_A * np.power(np.maximum(Sigma_gas_sm, 0.0), args.ks_N)
 
@@ -332,37 +349,48 @@ def main():
 
     Sigma_SFR_sm[~dust_domain] = np.nan
 
- 
-    # ---------- plotting: two panels ----------
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
 
-    # Left: dust surface density (log10)
-    im0 = axes[0].imshow(
-        np.log10(np.maximum(Sigma_dust, np.percentile(Sigma_dust, 1)*1e-3)),
-        extent=[xmin, xmax, ymin, ymax],
-        origin="lower", aspect="equal"
-    )
-    axes[0].scatter(x_star, y_star, s=6, c='r')
-    axes[0].set_xlabel("X [pc]"); axes[0].set_ylabel("Y [pc]")
-    axes[0].set_title(r"$\Sigma_{\rm dust}$  [M$_\odot$ pc$^{-2}$] (native)")
-    cb0 = plt.colorbar(im0, ax=axes[0]); cb0.set_label(r"log$_{10}$ $\Sigma_{\rm dust}$")
+       # --- surface-averaged mean Σ_SFR over the valid (non-NaN) map area ---
+    valid = np.isfinite(Sigma_SFR_sm)
+    sfr_scale_quint = 1.0
 
-    # Right: smoothed SFR (log10)
-    im1 = axes[1].imshow(
-        np.log10(Sigma_SFR_sm*1e6),
-        extent=[xmin, xmax, ymin, ymax],
-        origin="lower", aspect="equal",
-        vmin=-1, vmax=4.
-    )
-    axes[1].scatter(x_star, y_star, s=6, color='r')
-    axes[1].set_xlabel("X [pc]"); axes[1].set_ylabel("Y [pc]")
-    axes[1].set_title(r"Smoothed $\dot{\Sigma}_{\rm SFR}$  [M$_\odot$ yr$^{-1}$ kpc$^{-2}$]")
-    cb1 = plt.colorbar(im1, ax=axes[1]); cb1.set_label(r"log$_{10}$ $\dot{\Sigma}_{\rm SFR}$")
+    if np.any(valid):
+        A_pix_kpc2 = (dx_pc/1000.0) * (dy_pc/1000.0)   # pixel area in kpc^2
+        mean_Sigma_SFR_raw = float(np.nanmean(Sigma_SFR_sm[valid]))  # Msun/yr/kpc^2
+        area_kpc2 = float(np.count_nonzero(valid)) * A_pix_kpc2
+        SFR_total_raw = mean_Sigma_SFR_raw * area_kpc2
 
-    plt.savefig(args.out, dpi=150)
-    print(f"Saved figure to {args.out}", file=sys.stderr)
+        # --- Quintana calibration ---
+        # Target SFR inside 1 kpc (Quintana+ 2025):
+        SFR_QUINTANA_Msun_per_Myr = 2896.0
+        R_TARGET_PC = 1000.0
+        area_target_kpc2 = np.pi * (R_TARGET_PC / 1000.0)**2  # ≈ π kpc^2
 
-    # ---------- save all the useful arrays ----------
+        # Desired *mean* Σ_SFR inside 1 kpc:
+        mean_required = SFR_QUINTANA_Msun_per_Myr / (area_target_kpc2 * 1e6)
+
+        # Scale factor to make map’s mean Σ_SFR match Quintana’s mean:
+        sfr_scale_quint = mean_required / mean_Sigma_SFR_raw
+
+        # Apply this scale to the whole Σ_SFR map
+        Sigma_SFR_sm *= sfr_scale_quint
+
+        # Recompute diagnostics after scaling
+        mean_Sigma_SFR = float(np.nanmean(Sigma_SFR_sm[valid]))
+        SFR_total = mean_Sigma_SFR * area_kpc2
+
+        print(f"Surface-averaged Σ_SFR (raw map): {mean_Sigma_SFR_raw:.3e} Msun/yr/kpc^2, "
+              f"{1e6*mean_Sigma_SFR_raw:.3e} Msun/Myr/kpc^2", file=sys.stderr)
+        print(f"Area used: {area_kpc2:.3f} kpc^2 | Total SFR (raw map): {1e6*SFR_total_raw:.3e} Msun/Myr", file=sys.stderr)
+        print(f"Quintana et al. 2025: SFR(<1 kpc) = {SFR_QUINTANA_Msun_per_Myr:.0f} Msun/Myr", file=sys.stderr)
+        print(f"Applied Σ_SFR scaling factor sfr_scale_quint = {sfr_scale_quint:.3f} to match this.", file=sys.stderr)
+        print(f"Surface-averaged Σ_SFR (scaled map): {mean_Sigma_SFR:.3e} Msun/yr/kpc^2, "
+              f"{1e6*mean_Sigma_SFR:.3e} Msun/Myr/kpc^2", file=sys.stderr)
+        print(f"Total SFR (scaled map): {1e6*SFR_total:.3e} Msun/Myr", file=sys.stderr)
+    else:
+        print("No valid Σ_SFR pixels to average; skipping Quintana renormalisation.", file=sys.stderr)
+
+    # ---------- save all the useful arrays *after* renormalisation ----------
     np.savez_compressed(
         args.npz,
         x_grid=x_grid,
@@ -371,32 +399,77 @@ def main():
         Sigma_dust=Sigma_dust,
         Sigma_gas=Sigma_gas,
         Sigma_gas_smoothed=Sigma_gas_sm,
-        Sigma_SFR_smoothed=Sigma_SFR_sm,
+        Sigma_SFR_smoothed=Sigma_SFR_sm,   # <- now the Quintana-scaled map
         meta=dict(
             zmax=args.zmax, dz=args.dz,
             ks_A=args.ks_A, ks_N=args.ks_N,
             av_to_gas=args.av_to_gas,
             dust_to_gas=args.dust_to_gas,
             dust_per_mag=dust_per_mag,
-            kernel_pc=args.kernel_pc
+            kernel_pc=args.kernel_pc,
+            sfr_scale_quint=sfr_scale_quint,
         ),
     )
 
-        # --- surface-averaged mean Σ_SFR over the valid (non-NaN) map area ---
-    valid = np.isfinite(Sigma_SFR_sm)
-    if np.any(valid):
-        A_pix_kpc2 = (dx_pc/1000.0) * (dy_pc/1000.0)   # pixel area in kpc^2
-        mean_Sigma_SFR = float(np.nanmean(Sigma_SFR_sm[valid]))  # Msun/yr/kpc^2
-        area_kpc2 = float(np.count_nonzero(valid)) * A_pix_kpc2
-        SFR_total = mean_Sigma_SFR * area_kpc2
 
-        print(f"Surface-averaged Σ_SFR (map): {mean_Sigma_SFR:.3e} Msun/yr/kpc^2, {1e6*mean_Sigma_SFR:.3e} Msun/Myr/kpc^2", file=sys.stderr)
-        print(f"Area used: {area_kpc2:.3f} kpc^2 | Total SFR: {1e6*SFR_total:.3e} Msun/Myr", file=sys.stderr)
-        print(f"Quintana et al. 2025 find a star formation rate inside 1 kpc: 2896^+417_-1 Msun/Myr", file=sys.stderr)
-        print(f"Normalisation would need to be adjusted by a factor of {2896.0 / (np.pi*1e6*mean_Sigma_SFR):.3f} to match.", file=sys.stderr)
-    else:
-        print("No valid Σ_SFR pixels to average.", file=sys.stderr)
+    # ---------- plotting: two panels ----------
+    #fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), #constrained_layout=False,
+                         sharex=True, sharey=True)
+    fig.subplots_adjust(wspace=-0.350)
 
+
+    im0 = axes[0].imshow(
+        np.log10(np.maximum(Sigma_dust, np.percentile(Sigma_dust, 1))),
+        extent=[xmin, xmax, ymin, ymax],
+        origin="lower", aspect="equal",
+        vmin=-3, vmax=-0.5,
+        cmap="plasma",                      # <- change colourscheme
+    )
+    axes[0].scatter(x_star, y_star, s=3, c='limegreen')
+    axes[0].scatter(0.0, 0.0, s=20, marker='+', color='w')
+    axes[0].set_xlabel("X [pc]"); axes[0].set_ylabel("Y [pc]")
+    # no title
+    # axes[0].set_title(...)
+
+    cb0 = fig.colorbar(
+        im0, ax=axes[0],
+        orientation="horizontal",
+        location="top",        # <- put the bar above the panel
+        fraction=0.035,        # <- thinner bar
+        pad=0.08,              # <- small gap above the axes
+    )
+    cb0.set_label(r"log$_{10}$ $\Sigma_{\rm dust}$ [g cm$^{-2}$]")
+    cb0.ax.xaxis.set_ticks_position("top")
+    cb0.ax.xaxis.set_label_position("top")
+
+
+
+    im1 = axes[1].imshow(
+        np.log10(Sigma_SFR_sm*1e6),
+        extent=[xmin, xmax, ymin, ymax],
+        origin="lower", aspect="equal",
+        vmin=1, vmax=3.5
+    )
+
+    axes[1].scatter(x_star, y_star, s=3, color='r')
+    axes[1].scatter(0.0, 0.0, s=20, marker='+', color='w')
+    axes[1].set_xlabel("X [pc]") #; axes[1].set_ylabel("Y [pc]")
+
+    cb1 = fig.colorbar(
+        im1, ax=axes[1],
+        orientation="horizontal",
+        location="top",        # <- bar above panel
+        fraction=0.035,        # <- thinner
+        pad=0.08,
+    )
+    cb1.set_label(r"log$_{10}$ $\dot{\Sigma}_{\rm SFR}$ [$M_{\odot}$ Myr$^{-1}$ kpc$^{-2}$]")
+    cb1.ax.xaxis.set_ticks_position("top")
+    cb1.ax.xaxis.set_label_position("top")
+
+    plt.savefig(args.out, dpi=150, bbox_inches="tight")
+    print(f"Saved figure to {args.out}", file=sys.stderr)
     plt.show()
+
 if __name__ == "__main__":
     main()

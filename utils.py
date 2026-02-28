@@ -28,6 +28,15 @@ def xi_norm_on_interval(M, Mmin=0.08, Mmax=120.0):
     Z = np.trapz(y, x)
     return chabrier2003_unnorm_pdf(M) / Z
 
+
+def imf_mean_mass(Mmin=0.08, Mmax=120.0, n=20000):
+    x = np.logspace(np.log10(Mmin), np.log10(Mmax), n)
+    y = xi_norm_on_interval(x, Mmin=Mmin, Mmax=Mmax)  # normalized number pdf
+    num = np.trapz(x * y, x)
+    den = np.trapz(y, x)
+    return float(num / den)
+
+
 def load_grid_layout(path, flatten=True):
     """
     Load a PPP grid pack in a shape-agnostic way and return a dict with

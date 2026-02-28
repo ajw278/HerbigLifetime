@@ -342,7 +342,7 @@ def main():
     cbar = fig.colorbar(last_im, ax=axs, fraction=0.03, pad=0.02)
     cbar.set_label("$p_\\mathrm{det}$")
 
-    plt.savefig(args.out, dpi=220)
+    plt.savefig(args.out, dpi=220, bbox_inches="tight")
     print(f"[OK] saved {os.path.abspath(args.out)}")
 
 if __name__ == "__main__":

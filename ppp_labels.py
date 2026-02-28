@@ -31,5 +31,12 @@ LATEX_LABELS = {
     "log10_tau@8.0Msun": r"\log_{10}\,\tau(8.0\,M_\odot)\ [{\rm yr}]",
     
     "log10_s_birth": r"\log_{10}\,s_{\rm birth}",
-    "ln_s_birth":    r"\ln\,s_{\rm birth}"
+    "ln_s_birth":    r"\ln\,s_{\rm birth}",
+    "log_k_geom":   r"\log_{10}\,f_{\rm SFR}",
+    "k_geom":   r"f_{\rm SFR}",
+    "tau0_Myr":      r"\tau_0\ [{\rm Myr}]",
+    "a0":            r"a_0",
+    "a_R":           r"$a_R$",
+    "a_M":           r"a_M",
+    "alpha_tau": r"\alpha_\tau",
 }
